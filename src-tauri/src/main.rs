@@ -53,12 +53,23 @@ fn get_darkmode() -> bool {
 }
 
 fn setup_logger() -> Result<(), fern::InitError> {
-    fern::Dispatch::new()
+    let mut dispatch = fern::Dispatch::new()
         .format(|out, message, record| out.finish(format_args!("[{}] {}", record.level(), message)))
         .level(log::LevelFilter::Info)
-        .chain(std::io::stdout())
-        .chain(fern::log_file("SceneBuilder.log")?)
-        .apply()?;
+        .chain(std::io::stdout());
+
+    // Try to create log file in user's data directory, fall back to stdout-only if not possible
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let log_dir = data_dir.join("SexLabSceneBuilder");
+        if std::fs::create_dir_all(&log_dir).is_ok() {
+            let log_path = log_dir.join("SceneBuilder.log");
+            if let Ok(log_file) = fern::log_file(&log_path) {
+                dispatch = dispatch.chain(log_file);
+            }
+        }
+    }
+
+    dispatch.apply()?;
     Ok(())
 }
 
