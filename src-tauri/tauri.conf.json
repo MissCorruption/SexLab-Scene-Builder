@@ -16,10 +16,13 @@
     ],
     "category": "DeveloperTool",
     "copyright": "Copyright Scrab 2023. All rights reserved.",
-    "targets": "all",
+    "targets": ["deb", "rpm", "nsis", "msi"],
     "linux": {
-      "appimage": {
-        "bundleMediaFramework": false
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "gtk3"]
       }
     }
   },
