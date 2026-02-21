@@ -83,3 +83,20 @@ jobs:
           releaseDraft: false
           prerelease: true
           updaterJsonPreferNsis: true
+
+      - name: Package and upload Linux binary tarball
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BINARY="src-tauri/target/release/SexLab Scene Builder"
+          if [ ! -f "$BINARY" ]; then
+            BINARY=$(find src-tauri/target -name "SexLab Scene Builder" -type f -executable | head -1)
+          fi
+          tar -czf sexlab-scene-builder-linux-x86_64.tar.gz -C "$(dirname "$BINARY")" "SexLab Scene Builder"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="nightly"
+          fi
+          gh release upload "$TAG" sexlab-scene-builder-linux-x86_64.tar.gz --clobber
