@@ -43,8 +43,11 @@ pub struct Prefs {
     pub left_panel_width: f32,
     pub right_panel_width: f32,
     pub bottom_panel_height: f32,
-    /// Height of the Furniture card inside the tags/furniture side panel.
-    pub furniture_panel_height: f32,
+    pub window_width: f32,
+    pub window_height: f32,
+    pub window_x: Option<f32>,
+    pub window_y: Option<f32>,
+    pub window_maximized: bool,
     /// Saved custom tags ("Yours" group in the tag tree).
     pub custom_tags: Vec<String>,
     /// "Don't show this tip again on export?" (Pandora clip-folder tip).
@@ -61,8 +64,12 @@ impl Default for Prefs {
             theme: ThemePref::System,
             left_panel_width: 260.0,
             right_panel_width: 300.0,
-            bottom_panel_height: 190.0,
-            furniture_panel_height: 220.0,
+            bottom_panel_height: crate::layout::POSITIONS_PANEL_FALLBACK_H,
+            window_width: crate::layout::WINDOW_DEFAULT_W,
+            window_height: crate::layout::WINDOW_DEFAULT_H,
+            window_x: None,
+            window_y: None,
+            window_maximized: false,
             custom_tags: Vec::new(),
             hide_export_clip_tip: false,
             hide_export_merge_warn: false,
@@ -96,5 +103,58 @@ impl Prefs {
         if let Ok(text) = serde_json::to_string_pretty(self) {
             let _ = fs::write(path, text);
         }
+    }
+
+    pub fn apply_viewport(&self, mut viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
+        let w = self.window_width.max(crate::layout::WINDOW_MIN_W);
+        let h = self.window_height.max(crate::layout::WINDOW_MIN_H);
+        viewport = viewport
+            .with_inner_size([w, h])
+            .with_min_inner_size([crate::layout::WINDOW_MIN_W, crate::layout::WINDOW_MIN_H])
+            .with_maximized(self.window_maximized);
+        if let (Some(x), Some(y)) = (self.window_x, self.window_y) {
+            viewport = viewport.with_position([x, y]);
+        }
+        viewport
+    }
+
+    /// Copy current OS window geometry into prefs. Returns true if anything changed.
+    pub fn capture_viewport(&mut self, ctx: &egui::Context) -> bool {
+        let vp = ctx.input(|i| i.viewport().clone());
+        if vp.minimized == Some(true) {
+            return false;
+        }
+        let mut changed = false;
+        let maximized = vp.maximized.unwrap_or(false);
+        if maximized != self.window_maximized {
+            self.window_maximized = maximized;
+            changed = true;
+        }
+        if maximized {
+            return changed;
+        }
+        if let Some(inner) = vp.inner_rect {
+            let w = inner.width().round();
+            let h = inner.height().round();
+            if w >= crate::layout::WINDOW_MIN_W && h >= crate::layout::WINDOW_MIN_H {
+                if (w - self.window_width).abs() > 1.0 || (h - self.window_height).abs() > 1.0 {
+                    self.window_width = w;
+                    self.window_height = h;
+                    changed = true;
+                }
+            }
+        }
+        if let Some(outer) = vp.outer_rect {
+            let x = outer.min.x.round();
+            let y = outer.min.y.round();
+            let pos_changed = self.window_x.map(|px| (px - x).abs() > 1.0).unwrap_or(true)
+                || self.window_y.map(|py| (py - y).abs() > 1.0).unwrap_or(true);
+            if pos_changed {
+                self.window_x = Some(x);
+                self.window_y = Some(y);
+                changed = true;
+            }
+        }
+        changed
     }
 }

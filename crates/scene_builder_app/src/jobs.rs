@@ -15,6 +15,8 @@ pub enum JobEvent {
     PackageUpdated {
         package: scene_builder_core::project::package::Package,
         message: String,
+        /// False for a fresh SLAL import (new baseline). True for enrich-in-place.
+        dirty: bool,
     },
 }
 

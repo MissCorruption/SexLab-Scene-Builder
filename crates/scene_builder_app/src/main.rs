@@ -8,14 +8,17 @@ mod console_win;
 mod furniture;
 mod graph;
 mod graph_layout;
+mod io;
 mod jobs;
 mod layout;
+mod positions;
 mod prefs;
 mod stage_editor;
 mod tag_presets;
 mod tag_tree;
 mod theme;
 mod toasts;
+mod workspace;
 
 use app::SceneBuilderApp;
 use log::LevelFilter;
@@ -36,10 +39,8 @@ fn main() -> eframe::Result<()> {
 
     init_logging(prefs.show_console);
 
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title(SceneBuilderApp::APP_TITLE)
-        .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([800.0, 500.0]);
+    let mut viewport = prefs
+        .apply_viewport(egui::ViewportBuilder::default().with_title(SceneBuilderApp::APP_TITLE));
 
     if let Some(icon) = load_icon() {
         viewport = viewport.with_icon(icon);
@@ -87,7 +88,8 @@ fn init_logging(also_console: bool) {
     {
         // Always chain — ConsoleWriter no-ops until View → Show console / --console.
         let _ = also_console;
-        dispatch = dispatch.chain(Box::new(console_win::console_writer()) as Box<dyn std::io::Write + Send>);
+        dispatch = dispatch
+            .chain(Box::new(console_win::console_writer()) as Box<dyn std::io::Write + Send>);
     }
 
     #[cfg(not(windows))]
