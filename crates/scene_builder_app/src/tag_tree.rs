@@ -1,6 +1,7 @@
 //! Tag editor: search/create plus framed SFW / NSFW / Custom groups.
 //! Selected tags are highlighted in-place (no separate “selected” chip list).
 
+use crate::layout;
 use crate::tag_presets::{TAGS_NSFW, TAGS_SFW};
 use egui::{Color32, RichText, Stroke, TextEdit};
 
@@ -30,7 +31,10 @@ pub struct TagTreeResult {
 }
 
 fn tag_key(tag: &str) -> String {
-    tag.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect()
+    tag.to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
 }
 
 fn preset_canonical(tag: &str) -> Option<&'static str> {
@@ -204,6 +208,16 @@ fn tag_tree_ui_inner(
     let filter = state.search.trim().to_lowercase();
     let matches = |tag: &str| filter.is_empty() || tag.to_lowercase().contains(&filter);
 
+    let mut custom_display: Vec<String> =
+        custom_tags.iter().filter(|t| matches(t)).cloned().collect();
+    for t in tags.iter() {
+        if preset_canonical(t).is_none() && matches(t) && !contains_key(&custom_display, t) {
+            custom_display.push(t.clone());
+        }
+    }
+    custom_display.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    let show_custom = filter.is_empty() || !custom_display.is_empty();
+
     for (group, presets, chip) in [
         ("SFW", TAGS_SFW, ChipColor::Cyan),
         ("NSFW", TAGS_NSFW, ChipColor::Volcano),
@@ -216,7 +230,7 @@ fn tag_tree_ui_inner(
             chip_wrap_row(ui, inner_w, |ui| {
                 for tag in visible {
                     let on = contains_key(tags, tag);
-                    let chip_max = ui.available_width().clamp(48.0, inner_w);
+                    let chip_max = ui.available_width().min(inner_w).max(16.0);
                     if preset_chip(ui, tag, on, chip, dark, chip_max).clicked() {
                         if on {
                             let key = tag_key(tag);
@@ -232,19 +246,7 @@ fn tag_tree_ui_inner(
         ui.add_space(6.0);
     }
 
-    let mut custom_display: Vec<String> = custom_tags
-        .iter()
-        .filter(|t| matches(t))
-        .cloned()
-        .collect();
-    for t in tags.iter() {
-        if preset_canonical(t).is_none() && matches(t) && !contains_key(&custom_display, t) {
-            custom_display.push(t.clone());
-        }
-    }
-    custom_display.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-
-    if filter.is_empty() || !custom_display.is_empty() {
+    if show_custom {
         let chip = ChipColor::Purple;
         group_frame(ui, panel_w, "Custom", chip, dark, |ui, inner_w| {
             if custom_display.is_empty() {
@@ -364,10 +366,10 @@ fn tag_tree_ui_inner(
 fn chip_wrap_row(ui: &mut egui::Ui, inner_w: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.allocate_ui_with_layout(
         egui::vec2(inner_w.max(1.0), 0.0),
-        egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+        egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
         |ui| {
-            ui.set_max_width(inner_w);
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            ui.set_max_width(inner_w.max(1.0));
+            ui.spacing_mut().item_spacing = egui::vec2(layout::TAG_CHIP_GAP, layout::TAG_CHIP_GAP);
             add_contents(ui);
         },
     );
@@ -416,137 +418,159 @@ fn custom_pill(
     };
 
     let mut action = CustomPillAction::None;
-    const ACTION_W: f32 = 40.0;
-    const H_PAD: f32 = 12.0; // Frame inner_margin x * 2
-    const V_PAD: f32 = 6.0; // Frame inner_margin y * 2
+    const BTN: f32 = 16.0;
+    const GAP: f32 = 2.0;
+    let action_w = BTN * 2.0 + GAP;
     let font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
-    let avail = ui.available_width().min(inner_w).max(48.0);
-    let max_pill = avail.min(280.0);
+    let remaining = ui.available_width();
+    // Leftover on this wrap-row is too small: consume it so the pill starts on
+    // the next line instead of overflowing the Custom frame.
+    if remaining < 48.0 && remaining + 1.0 < inner_w {
+        ui.allocate_exact_size(egui::vec2(remaining.max(0.0), 0.0), egui::Sense::hover());
+    }
+    let max_pill = ui.available_width().min(inner_w).max(16.0);
 
-    // Size to content like preset chips — fixed 200px pills ignored panel geometry.
-    let label_for_measure = if editing {
+    let measure_src = if editing {
         draft.as_ref().map(|d| d.as_str()).unwrap_or(tag)
     } else {
         tag
     };
-    let label_budget = (max_pill - H_PAD - ACTION_W - 4.0).max(20.0);
-    let display = if editing {
-        truncate_tag_label(ui, label_for_measure, label_budget.max(40.0), &font)
-    } else {
-        truncate_tag_label(ui, tag, label_budget, &font)
-    };
+    let label_budget = (max_pill - 12.0 - action_w).max(16.0);
+    let display = truncate_tag_label(ui, measure_src, label_budget, &font);
     let text_w = ui.fonts(|f| {
         f.layout_no_wrap(display.clone(), font.clone(), Color32::WHITE)
             .size()
             .x
     });
-    let content_need = if editing {
-        (label_budget.max(40.0) + ACTION_W + 4.0).min(max_pill - H_PAD)
+    // Exact size like SFW/NSFW chips. Frame + small_button overflowed the group.
+    let pill_w = if editing {
+        max_pill
     } else {
-        text_w + ACTION_W + 4.0
+        (text_w + 12.0 + action_w).clamp(48.0, max_pill)
     };
-    let pill_w = (content_need + H_PAD).clamp(48.0, max_pill);
-    let pill_h = ui.spacing().interact_size.y.max(18.0) + V_PAD;
+    let pill_h = ui.spacing().interact_size.y.max(22.0);
 
-    // Allocate the full framed size; do not clip — undersized clip cut off pills
-    // and the Custom group stroke at the bottom.
-    ui.allocate_ui_with_layout(
-        egui::vec2(pill_w, pill_h),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.set_max_width(pill_w);
-            ui.set_min_size(egui::vec2(pill_w, pill_h));
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(pill_w, pill_h), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return action;
+    }
 
-            egui::Frame::new()
-                .fill(fill)
-                .stroke(Stroke::new(1.0, stroke))
-                .corner_radius(4.0)
-                .inner_margin(egui::Margin::symmetric(6, 3))
-                .show(ui, |ui| {
-                    let content_w = (pill_w - H_PAD).max(1.0);
-                    ui.set_max_width(content_w);
-                    ui.set_min_width(0.0);
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    ui.horizontal(|ui| {
-                        ui.set_max_width(content_w);
-                        if editing {
-                            if let Some(draft) = draft {
-                                let edit_w = (content_w - ACTION_W).clamp(40.0, content_w);
-                                let output = TextEdit::singleline(draft)
-                                    .desired_width(edit_w)
-                                    .frame(false)
-                                    .text_color(text_color)
-                                    .id_salt((id_salt, "inline_rename", tag))
-                                    .show(ui);
-                                if *rename_needs_focus {
-                                    output.response.request_focus();
-                                    if let Some(mut ts) =
-                                        TextEdit::load_state(ui.ctx(), output.response.id)
-                                    {
-                                        let range = egui::text::CCursorRange::two(
-                                            egui::text::CCursor::new(0),
-                                            egui::text::CCursor::new(draft.chars().count()),
-                                        );
-                                        ts.cursor.set_char_range(Some(range));
-                                        ts.store(ui.ctx(), output.response.id);
-                                    }
-                                    *rename_needs_focus = false;
-                                }
-                                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                    *finish_rename = Some(true);
-                                }
-                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                    *finish_rename = Some(false);
-                                }
-                                if ui
-                                    .small_button(RichText::new("✓").color(accent))
-                                    .on_hover_text("Save name")
-                                    .clicked()
-                                {
-                                    *finish_rename = Some(true);
-                                }
-                                if ui
-                                    .small_button(
-                                        RichText::new("✕")
-                                            .color(Color32::from_rgb(0xcf, 0x13, 0x22)),
-                                    )
-                                    .on_hover_text("Cancel")
-                                    .clicked()
-                                {
-                                    *finish_rename = Some(false);
-                                }
-                            }
-                        } else {
-                            let truncated = display != tag;
-                            let label_resp = ui.add(
-                                egui::Label::new(
-                                    RichText::new(&display).color(text_color).font(font.clone()),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
-                            if truncated {
-                                label_resp.clone().on_hover_text(tag);
-                            }
-                            if label_resp.clicked() {
-                                action = CustomPillAction::Toggle;
-                            }
-                            if ui.small_button("✎").on_hover_text("Rename").clicked() {
-                                action = CustomPillAction::StartRename;
-                            }
-                            if ui
-                                .small_button(
-                                    RichText::new("✕").color(Color32::from_rgb(0xcf, 0x13, 0x22)),
-                                )
-                                .on_hover_text("Remove saved tag")
-                                .clicked()
-                            {
-                                action = CustomPillAction::Remove;
-                            }
-                        }
-                    });
-                });
-        },
+    ui.painter().rect(
+        rect,
+        4.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
     );
+
+    let inner = rect.shrink2(egui::vec2(6.0, 2.0));
+    let btn_y = inner.center().y - BTN * 0.5;
+    let del_rect =
+        egui::Rect::from_min_size(egui::pos2(inner.right() - BTN, btn_y), egui::vec2(BTN, BTN));
+    let edit_rect = egui::Rect::from_min_size(
+        egui::pos2(del_rect.left() - GAP - BTN, btn_y),
+        egui::vec2(BTN, BTN),
+    );
+    let text_rect =
+        egui::Rect::from_min_max(inner.min, egui::pos2(edit_rect.left() - 2.0, inner.max.y));
+    let id = ui.id().with(id_salt).with("custom_pill").with(tag);
+
+    if editing {
+        if let Some(draft) = draft {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+            child.set_clip_rect(text_rect.intersect(ui.clip_rect()));
+            let output = TextEdit::singleline(draft)
+                .desired_width(text_rect.width().max(16.0))
+                .frame(false)
+                .text_color(text_color)
+                .id_salt((id_salt, "inline_rename", tag))
+                .show(&mut child);
+            if *rename_needs_focus {
+                output.response.request_focus();
+                if let Some(mut ts) = TextEdit::load_state(ui.ctx(), output.response.id) {
+                    let range = egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(draft.chars().count()),
+                    );
+                    ts.cursor.set_char_range(Some(range));
+                    ts.store(ui.ctx(), output.response.id);
+                }
+                *rename_needs_focus = false;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                *finish_rename = Some(true);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                *finish_rename = Some(false);
+            }
+        }
+        let ok = ui
+            .interact(edit_rect, id.with("ok"), egui::Sense::click())
+            .on_hover_text("Save name");
+        let cancel = ui
+            .interact(del_rect, id.with("cancel"), egui::Sense::click())
+            .on_hover_text("Cancel");
+        ui.painter().text(
+            edit_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "✓",
+            font.clone(),
+            accent,
+        );
+        ui.painter().text(
+            del_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "✕",
+            font,
+            Color32::from_rgb(0xcf, 0x13, 0x22),
+        );
+        if ok.clicked() {
+            *finish_rename = Some(true);
+        }
+        if cancel.clicked() {
+            *finish_rename = Some(false);
+        }
+    } else {
+        let galley = ui.fonts(|f| f.layout_no_wrap(display.clone(), font.clone(), text_color));
+        let text_pos = egui::pos2(
+            text_rect.left(),
+            text_rect.center().y - galley.size().y * 0.5,
+        );
+        ui.painter().galley(text_pos, galley, text_color);
+        let label = ui.interact(text_rect, id.with("label"), egui::Sense::click());
+        if display != tag {
+            label.clone().on_hover_text(tag);
+        }
+        if label.clicked() {
+            action = CustomPillAction::Toggle;
+        }
+        let edit = ui
+            .interact(edit_rect, id.with("edit"), egui::Sense::click())
+            .on_hover_text("Rename");
+        let del = ui
+            .interact(del_rect, id.with("del"), egui::Sense::click())
+            .on_hover_text("Remove saved tag");
+        ui.painter().text(
+            edit_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "✎",
+            font.clone(),
+            text_color,
+        );
+        ui.painter().text(
+            del_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "✕",
+            font,
+            Color32::from_rgb(0xcf, 0x13, 0x22),
+        );
+        if edit.clicked() {
+            action = CustomPillAction::StartRename;
+        }
+        if del.clicked() {
+            action = CustomPillAction::Remove;
+        }
+    }
 
     action
 }
@@ -566,8 +590,8 @@ fn group_frame(
         egui::vec2(outer_w.max(1.0), 0.0),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
+            ui.set_min_width(outer_w);
             ui.set_max_width(outer_w);
-            ui.set_min_width(0.0);
             egui::Frame::new()
                 .fill(panel)
                 .stroke(Stroke::new(
@@ -575,15 +599,16 @@ fn group_frame(
                     accent.gamma_multiply(if dark { 0.55 } else { 0.35 }),
                 ))
                 .corner_radius(6.0)
-                .inner_margin(egui::Margin::same(8))
+                .inner_margin(egui::Margin::same(layout::TAG_FRAME_PAD as i8))
                 .show(ui, |ui| {
-                    let inner_w = (outer_w - 16.0).max(0.0).min(ui.available_width());
-                    ui.set_min_width(0.0);
+                    let inner_w = (outer_w - layout::TAG_FRAME_PAD * 2.0)
+                        .max(0.0)
+                        .min(ui.available_width());
+                    ui.set_min_width(inner_w);
                     ui.set_max_width(inner_w);
                     ui.label(RichText::new(title).color(accent).size(13.0));
                     ui.add_space(4.0);
                     add_contents(ui, inner_w);
-                    // Keep the bottom stroke/pills from being clipped by a tight parent.
                     ui.add_space(2.0);
                 });
         },

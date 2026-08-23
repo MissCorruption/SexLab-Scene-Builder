@@ -9,6 +9,7 @@ mod furniture;
 mod graph;
 mod graph_layout;
 mod jobs;
+mod layout;
 mod prefs;
 mod stage_editor;
 mod tag_presets;

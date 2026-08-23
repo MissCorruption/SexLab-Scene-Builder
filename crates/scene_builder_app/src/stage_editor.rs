@@ -10,7 +10,6 @@ use crate::tag_presets::SLAL_SOUNDS;
 use crate::tag_tree::{tag_tree_ui, TagTreeState};
 
 const MAX_POSITIONS: usize = 5;
-const MAX_NAME_LEN: usize = 30;
 
 #[derive(Debug, Clone)]
 pub struct StageEditorState {
@@ -46,11 +45,7 @@ impl StageEditorState {
         }
         draft.positions.truncate(n);
 
-        let basic_anim: Vec<bool> = draft
-            .positions
-            .iter()
-            .map(|p| p.event.len() <= 1)
-            .collect();
+        let basic_anim: Vec<bool> = draft.positions.iter().map(|p| p.event.len() <= 1).collect();
 
         Self {
             scene_id,
@@ -127,10 +122,10 @@ pub fn show_stage_editor(
         );
 
     let response = modal.show(ctx, |ui| {
-        // Exact size for this frame.
         ui.set_width(target_w);
-        ui.set_height(target_h);
-        ui.set_max_size(egui::vec2(target_w, target_h));
+        ui.set_min_width(target_w);
+        ui.set_max_width(target_w);
+        ui.set_max_height(target_h);
         editor_form(ui, state, custom_tags)
     });
 
@@ -186,9 +181,8 @@ fn editor_form(
     }
 
     // Ctrl/Cmd+Enter always saves; plain Enter saves unless a multiline has focus.
-    let ctrl_enter = ui.input(|i| {
-        i.key_pressed(Key::Enter) && (i.modifiers.command || i.modifiers.ctrl)
-    });
+    let ctrl_enter =
+        ui.input(|i| i.key_pressed(Key::Enter) && (i.modifiers.command || i.modifiers.ctrl));
     let plain_enter = ui.input(|i| {
         i.key_pressed(Key::Enter)
             && !i.modifiers.shift
@@ -216,12 +210,12 @@ fn editor_form(
             ui.set_clip_rect(left_rect);
             let name_edit = TextEdit::singleline(&mut state.draft.name)
                 .frame(false)
-                .char_limit(MAX_NAME_LEN)
                 .font(egui::TextStyle::Heading)
                 .hint_text("Stage Name")
+                .id_salt(("stage_name", state.draft.id.0.as_str()))
                 .desired_width((ui.available_width() - 8.0).max(60.0));
             let output = name_edit.show(ui);
-            if output.response.gained_focus() {
+            if output.response.gained_focus() && output.response.clicked() {
                 if let Some(mut text_state) = TextEdit::load_state(ui.ctx(), output.response.id) {
                     let range = egui::text::CCursorRange::two(
                         egui::text::CCursor::new(0),
@@ -244,7 +238,10 @@ fn editor_form(
             }
             let accent = crate::theme::accent(ui.visuals().dark_mode);
             if ui
-                .add(egui::Button::new(RichText::new("Save").color(egui::Color32::WHITE)).fill(accent))
+                .add(
+                    egui::Button::new(RichText::new("Save").color(egui::Color32::WHITE))
+                        .fill(accent),
+                )
                 .clicked()
             {
                 action = try_validate_and_save(state);
@@ -265,7 +262,7 @@ fn editor_form(
     let body_w = ui.available_width().max(1.0);
     egui::ScrollArea::vertical()
         .id_salt("stage_editor_scroll")
-        .auto_shrink([false, false])
+        .auto_shrink([false, true])
         .hscroll(false)
         .max_width(body_w)
         .show(ui, |ui| {
@@ -323,108 +320,94 @@ fn editor_form(
 
         ui.add_space(8.0);
         section_card(ui, "Positions", pos_accent, pos_fill, |ui| {
-            positions_section(ui, state);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width().max(1.0), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    positions_section(ui, state);
+                },
+            );
         });
 
         ui.add_space(8.0);
         section_card(ui, "Extra", extra_accent, extra_fill, |ui| {
-            // Avoid ui.columns — it expands the parent when content exceeds the soft max.
-            let gap = 8.0;
-            let col_w = ((ui.available_width() - gap * 2.0) / 3.0).max(100.0);
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(col_w, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_max_width(col_w);
-                        ui.horizontal(|ui| {
-                            ui.label("Navigation");
-                            crate::theme::info_tip(
-                                ui,
-                                "A short text for the player to read when given the option to branch into this stage.",
-                            );
-                        });
-                        let nav = TextEdit::multiline(&mut state.draft.extra.nav_text)
-                            .desired_rows(3)
-                            .desired_width(col_w)
-                            .char_limit(100);
-                        let nav_resp = ui.add(nav);
-                        if nav_resp.has_focus() {
-                            multiline_focused = true;
-                        }
-                        ui.label(
-                            RichText::new(format!(
-                                "{}/100",
-                                state.draft.extra.nav_text.chars().count()
-                            ))
-                            .weak()
-                            .small(),
+            even_columns(ui, 3, |i, ui| match i {
+                0 => {
+                    ui.horizontal(|ui| {
+                        ui.label("Navigation");
+                        crate::theme::info_tip(
+                            ui,
+                            "In-game label when the player picks among several next stages. Unused on a linear path.",
                         );
-                    },
-                );
-                ui.add_space(gap);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(col_w, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_max_width(col_w);
-                        ui.horizontal(|ui| {
-                            ui.label("Fixed Duration");
-                            crate::theme::info_tip(
-                                ui,
-                                "Duration of an animation that should only play once (does not loop).",
-                            );
-                        });
-                        let h = ui.spacing().interact_size.y;
-                        let w = ui.available_width().max(40.0);
-                        ui.add_sized(
-                            [w, h],
-                            egui::DragValue::new(&mut state.draft.extra.fixed_len)
-                                .speed(10.0)
-                                .range(0.0..=f32::MAX)
-                                .max_decimals(0)
-                                .suffix(" ms"),
+                    });
+                    let nav = TextEdit::multiline(&mut state.draft.extra.nav_text)
+                        .desired_rows(3)
+                        .desired_width(ui.available_width())
+                        .char_limit(100);
+                    let nav_resp = ui.add(nav);
+                    if nav_resp.has_focus() {
+                        multiline_focused = true;
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "{}/100",
+                            state.draft.extra.nav_text.chars().count()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
+                1 => {
+                    ui.horizontal(|ui| {
+                        ui.label("Fixed Duration");
+                        crate::theme::info_tip(
+                            ui,
+                            "Duration of an animation that should only play once (does not loop).",
                         );
-                    },
-                );
-                ui.add_space(gap);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(col_w, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_max_width(col_w);
-                        ui.horizontal(|ui| {
-                            ui.label("Sound (SLAL only)");
-                            crate::theme::info_tip(
-                                ui,
-                                "Classic SLAL sound category for this stage (not used by SLSB/.slr). First non-empty stage sets the animation default; differing stages become per-stage overrides.",
-                            );
+                    });
+                    let h = ui.spacing().interact_size.y;
+                    let w = ui.available_width().max(40.0);
+                    ui.add_sized(
+                        [w, h],
+                        egui::DragValue::new(&mut state.draft.extra.fixed_len)
+                            .speed(10.0)
+                            .range(0.0..=f32::MAX)
+                            .max_decimals(0)
+                            .suffix(" ms"),
+                    );
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        ui.label("Sound (SLAL only)");
+                        crate::theme::info_tip(
+                            ui,
+                            "Classic SLAL sound category for this stage (not used by SLSB/.slr). First non-empty stage sets the animation default; differing stages become per-stage overrides.",
+                        );
+                    });
+                    let current = if state.draft.extra.sound.is_empty() {
+                        "Unset"
+                    } else {
+                        state.draft.extra.sound.as_str()
+                    };
+                    egui::ComboBox::from_id_salt("slal_sound")
+                        .width(ui.available_width().max(40.0))
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(state.draft.extra.sound.is_empty(), "Unset")
+                                .clicked()
+                            {
+                                state.draft.extra.sound.clear();
+                            }
+                            for s in SLAL_SOUNDS.iter().filter(|s| !s.is_empty()) {
+                                ui.selectable_value(
+                                    &mut state.draft.extra.sound,
+                                    (*s).to_string(),
+                                    *s,
+                                );
+                            }
                         });
-                        let current = if state.draft.extra.sound.is_empty() {
-                            "Unset"
-                        } else {
-                            state.draft.extra.sound.as_str()
-                        };
-                        egui::ComboBox::from_id_salt("slal_sound")
-                            .width(ui.available_width().max(40.0))
-                            .selected_text(current)
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_label(state.draft.extra.sound.is_empty(), "Unset")
-                                    .clicked()
-                                {
-                                    state.draft.extra.sound.clear();
-                                }
-                                for s in SLAL_SOUNDS.iter().filter(|s| !s.is_empty()) {
-                                    ui.selectable_value(
-                                        &mut state.draft.extra.sound,
-                                        (*s).to_string(),
-                                        *s,
-                                    );
-                                }
-                            });
-                    },
-                );
+                }
             });
         });
     });
@@ -448,7 +431,10 @@ fn section_card(
 ) {
     let w = ui.available_width().max(1.0);
     ui.set_max_width(w);
-    let stroke = Stroke::new(1.0, accent.gamma_multiply(if ui.visuals().dark_mode { 0.55 } else { 0.35 }));
+    let stroke = Stroke::new(
+        1.0,
+        accent.gamma_multiply(if ui.visuals().dark_mode { 0.55 } else { 0.35 }),
+    );
     egui::Frame::new()
         .fill(fill)
         .stroke(stroke)
@@ -493,7 +479,11 @@ fn positions_section(ui: &mut egui::Ui, state: &mut StageEditorState) {
                     }
                     if n > 1
                         && ui
-                            .add(egui::Button::new(RichText::new("✕").size(11.0)).frame(false).small())
+                            .add(
+                                egui::Button::new(RichText::new("✕").size(11.0))
+                                    .frame(false)
+                                    .small(),
+                            )
                             .on_hover_text("Remove position")
                             .clicked()
                     {
@@ -501,12 +491,7 @@ fn positions_section(ui: &mut egui::Ui, state: &mut StageEditorState) {
                     }
                 });
         }
-        if n < MAX_POSITIONS
-            && ui
-                .button("＋")
-                .on_hover_text("Add position")
-                .clicked()
-        {
+        if n < MAX_POSITIONS && ui.button("+").on_hover_text("Add position").clicked() {
             state.draft.positions.push(Position::new(None));
             state.positions_info.push(PositionInfo::default());
             state.basic_anim.push(true);
@@ -517,11 +502,15 @@ fn positions_section(ui: &mut egui::Ui, state: &mut StageEditorState) {
         state.draft.positions.remove(idx);
         state.positions_info.remove(idx);
         state.basic_anim.remove(idx);
-        state.active_tab = state.active_tab.min(state.draft.positions.len().saturating_sub(1));
+        state.active_tab = state
+            .active_tab
+            .min(state.draft.positions.len().saturating_sub(1));
     }
 
     state.sync_lengths();
-    let tab = state.active_tab.min(state.draft.positions.len().saturating_sub(1));
+    let tab = state
+        .active_tab
+        .min(state.draft.positions.len().saturating_sub(1));
     state.active_tab = tab;
 
     let race_keys = state.race_keys.clone();
@@ -559,9 +548,8 @@ fn position_form(
 ) {
     crate::theme::fill_width(ui);
 
-    ui.columns(3, |cols| {
-        cols[0].vertical(|ui| {
-            crate::theme::fill_width(ui);
+    even_columns(ui, 3, |i, ui| match i {
+        0 => {
             ui.label("Race");
             ui.add(
                 TextEdit::singleline(race_filter)
@@ -592,17 +580,16 @@ fn position_form(
             if info.race.is_empty() {
                 info.race = "Human".into();
             }
-        });
-
-        cols[1].vertical(|ui| {
-            crate::theme::fill_width(ui);
+        }
+        1 => {
             ui.label("Sex");
             let futa_enabled = info.race == "Human";
-            crate::theme::sex_radios(ui, &mut info.sex, futa_enabled);
-        });
-
-        cols[2].vertical(|ui| {
-            crate::theme::fill_width(ui);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                crate::theme::sex_radios(ui, &mut info.sex, futa_enabled);
+            });
+        }
+        _ => {
             ui.label("SOS Angle");
             let mut schlong = pos.schlong as i32;
             if crate::theme::labeled_drag(
@@ -614,7 +601,7 @@ fn position_form(
             {
                 pos.schlong = schlong.clamp(-9, 9) as i8;
             }
-        });
+        }
     });
 
     ui.add_space(4.0);
@@ -641,13 +628,13 @@ fn position_form(
     });
 
     ensure_event0(pos);
-    ui.horizontal(|ui| {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(".hkx");
         ui.add(
             TextEdit::singleline(&mut pos.event[0])
                 .hint_text("Behavior file")
-                .desired_width(ui.available_width() - 40.0),
+                .desired_width(ui.available_width()),
         );
-        ui.label(".hkx");
     });
 
     if !*basic_anim {
@@ -655,14 +642,15 @@ fn position_form(
         for i in 1..pos.event.len() {
             ui.horizontal(|ui| {
                 ui.label("+");
-                ui.add(
-                    TextEdit::singleline(&mut pos.event[i])
-                        .desired_width(ui.available_width() - 80.0),
-                );
-                ui.label(".hkx");
-                if ui.small_button("✕").clicked() {
-                    remove_at = Some(i);
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").clicked() {
+                        remove_at = Some(i);
+                    }
+                    ui.label(".hkx");
+                    ui.add(
+                        TextEdit::singleline(&mut pos.event[i]).desired_width(ui.available_width()),
+                    );
+                });
             });
         }
         if let Some(i) = remove_at {
@@ -688,9 +676,8 @@ fn position_form(
     ui.separator();
     ui.add_space(2.0);
 
-    ui.columns(4, |cols| {
-        cols[0].vertical(|ui| {
-            crate::theme::fill_width(ui);
+    even_columns(ui, 4, |i, ui| match i {
+        0 => {
             ui.label("Data");
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
@@ -717,28 +704,24 @@ fn position_form(
             if let Some(i) = remove_tag {
                 pos.tags.remove(i);
             }
-            ui.horizontal(|ui| {
-                let tag_w = (ui.available_width() - 28.0).max(40.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let add_clicked = ui.small_button("+").clicked();
                 ui.add(
                     TextEdit::singleline(new_pos_tag)
                         .hint_text("tag")
-                        .desired_width(tag_w)
+                        .desired_width(ui.available_width().max(40.0))
                         .id_salt(("pos_tag", ui.id())),
                 );
-                if ui.small_button("+").clicked() {
+                if add_clicked {
                     let t = new_pos_tag.trim().to_string();
-                    if !t.is_empty()
-                        && !pos.tags.iter().any(|e| e.eq_ignore_ascii_case(&t))
-                    {
+                    if !t.is_empty() && !pos.tags.iter().any(|e| e.eq_ignore_ascii_case(&t)) {
                         pos.tags.push(t);
                         new_pos_tag.clear();
                     }
                 }
             });
-        });
-
-        cols[1].vertical(|ui| {
-            crate::theme::fill_width(ui);
+        }
+        1 => {
             ui.label("Offset");
             for (label, val, clamp) in [
                 ("X", &mut pos.offset.x, None),
@@ -752,10 +735,8 @@ fn position_form(
                 }
                 crate::theme::labeled_drag(ui, label, drag);
             }
-        });
-
-        cols[2].vertical(|ui| {
-            crate::theme::fill_width(ui);
+        }
+        2 => {
             ui.label("Scale");
             let h = ui.spacing().interact_size.y;
             let w = ui.available_width();
@@ -766,13 +747,11 @@ fn position_form(
                     .range(0.01..=2.0)
                     .min_decimals(2),
             );
-        });
-
-        cols[3].vertical(|ui| {
-            crate::theme::fill_width(ui);
+        }
+        _ => {
             ui.label("Stripping");
             stripping_ui(ui, &mut pos.strip_data);
-        });
+        }
     });
 
     ui.add_space(4.0);
@@ -826,4 +805,35 @@ fn stripping_ui(ui: &mut egui::Ui, s: &mut Stripping) {
             s.nothing = false;
         }
     });
+}
+
+fn even_columns(ui: &mut egui::Ui, n: usize, mut add: impl FnMut(usize, &mut egui::Ui)) {
+    if n == 0 {
+        return;
+    }
+    let gap = 8.0;
+    let n_f = n as f32;
+    let total_w = ui.available_width();
+    let col_w = ((total_w - gap * (n_f - 1.0)) / n_f).max(80.0);
+    // Height 0 — do not use horizontal_top; that allocates available_height
+    // (the modal viewport) and stretches the Positions card.
+    ui.allocate_ui_with_layout(
+        egui::vec2(total_w.max(1.0), 0.0),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            ui.set_max_width(total_w);
+            ui.spacing_mut().item_spacing.x = gap;
+            for i in 0..n {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(col_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(col_w);
+                        ui.set_max_width(col_w);
+                        add(i, ui);
+                    },
+                );
+            }
+        },
+    );
 }
