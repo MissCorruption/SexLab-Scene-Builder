@@ -5,8 +5,8 @@ use scene_builder_core::project::scene::Scene;
 use scene_builder_core::project::NanoID;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-pub const LAYOUT_H_GAP: f32 = 280.0;
-pub const LAYOUT_V_GAP: f32 = 150.0;
+pub const LAYOUT_H_GAP: f32 = 360.0;
+pub const LAYOUT_V_GAP: f32 = 190.0;
 pub const MAX_STAGES_PER_ROW: usize = 5;
 
 /// True when every graph node shares the same (x, y) — typical of stacked SLAL imports.
@@ -120,8 +120,7 @@ fn compute_layered_positions(
     }
     ordered.extend(orphans.iter().copied());
 
-    let linear = orphans.is_empty()
-        && by_level.values().all(|ids| ids.len() <= 1);
+    let linear = orphans.is_empty() && by_level.values().all(|ids| ids.len() <= 1);
 
     let mut positions = HashMap::new();
     if linear && ordered.len() > MAX_STAGES_PER_ROW {
@@ -139,7 +138,10 @@ fn compute_layered_positions(
                 for (i, id) in ids.iter().enumerate() {
                     positions.insert(
                         (*id).clone(),
-                        (40.0 + (lv as f32) * LAYOUT_H_GAP, 40.0 + (i as f32) * LAYOUT_V_GAP),
+                        (
+                            40.0 + (lv as f32) * LAYOUT_H_GAP,
+                            40.0 + (i as f32) * LAYOUT_V_GAP,
+                        ),
                     );
                 }
             }
@@ -209,4 +211,3 @@ mod tests {
         assert!(bx > ax, "B should be to the right of A: {ax} vs {bx}");
     }
 }
-

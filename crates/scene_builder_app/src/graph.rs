@@ -10,10 +10,10 @@ use scene_builder_core::project::stage::Stage;
 use scene_builder_core::project::NanoID;
 use std::collections::HashMap;
 
-// Stage node card size and mint fill (240×112, 6px double border).
-pub const NODE_W: f32 = 240.0;
-pub const NODE_H: f32 = 112.0;
-const HEADER_H: f32 = 36.0;
+// Stage node card size and mint fill (300×140, 6px double border).
+pub const NODE_W: f32 = 300.0;
+pub const NODE_H: f32 = 140.0;
+const HEADER_H: f32 = 44.0;
 const ROOT_BORDER: Color32 = Color32::from_rgb(0, 88, 0);
 const FIXED_LEN_PINK: Color32 = Color32::from_rgb(255, 175, 175);
 const FIXED_LEN_CYAN: Color32 = Color32::from_rgb(175, 235, 255);
@@ -30,8 +30,12 @@ const DRAG_THRESHOLD: f32 = 4.0;
 const EDGE_HIT_DIST: f32 = 6.0;
 const ZOOM_MIN: f32 = 0.25;
 const ZOOM_MAX: f32 = 5.0;
-/// Status icon hit target (screen px) — large enough for reliable tooltips.
-const ICON_HIT: f32 = 20.0;
+/// Status / hover control size in world pixels (scales with zoom).
+const ICON_HIT: f32 = 22.0;
+/// Stage name size in world pixels.
+const NAME_PX: f32 = 18.0;
+const ROOT_FONT_PX: f32 = 12.0;
+const TOOLBAR_BTN: f32 = 22.0;
 
 #[derive(Debug, Clone)]
 pub struct GraphSnapshot {
@@ -59,6 +63,8 @@ pub struct GraphView {
     drag_accum: Vec2,
     panning_bg: bool,
     drag_snapshot: Option<GraphSnapshot>,
+    /// Right-click menu on a stage node (id + screen pos).
+    node_menu: Option<(NanoID, Pos2)>,
 }
 
 impl Default for GraphView {
@@ -78,6 +84,7 @@ impl Default for GraphView {
             drag_accum: Vec2::ZERO,
             panning_bg: false,
             drag_snapshot: None,
+            node_menu: None,
         }
     }
 }
@@ -195,11 +202,23 @@ impl GraphView {
     pub fn ui(&mut self, ui: &mut egui::Ui, scene: &mut Scene) -> GraphAction {
         let mut action = GraphAction::None;
         let mut dirty = false;
-        let (response, mut painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+        let (response, mut painter) =
+            ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
+        if self.last_canvas_rect != Rect::NOTHING
+            && self.last_canvas_rect.width() > 1.0
+            && self.zoom > 0.0
+        {
+            let old_c = self.last_canvas_rect.center();
+            let new_c = rect.center();
+            let shift = old_c - new_c;
+            if shift.length_sq() > 0.01 {
+                self.pan += shift / self.zoom;
+            }
+        }
         self.last_canvas_rect = rect;
         painter.rect_filled(rect, 0.0, graph_bg(ui.visuals().dark_mode));
-        painter.set_clip_rect(rect);
+        painter.set_clip_rect(rect.intersect(ui.clip_rect()));
 
         if self.needs_fit {
             // Wait until the canvas has a real size (first frames after import can be tiny).
@@ -265,9 +284,14 @@ impl GraphView {
             }
         }
 
+        let mut opened_node_menu = false;
         if response.secondary_clicked() {
             if let Some(pos) = pointer_pos {
-                if topmost_node_at(pos).is_none() {
+                if let Some(id) = topmost_node_at(pos) {
+                    self.node_menu = Some((id, pos));
+                    opened_node_menu = true;
+                } else {
+                    self.node_menu = None;
                     let hit = edge_paths
                         .iter()
                         .find(|(_, _, path)| dist_to_polyline(pos, path) <= EDGE_HIT_DIST)
@@ -301,18 +325,15 @@ impl GraphView {
                 continue;
             }
             let is_root = scene.root == stage.id;
-            let hovered = hover_pos
-                .map(|p| node_rect.contains(p))
-                .unwrap_or(false);
+            let hovered = hover_pos.map(|p| node_rect.contains(p)).unwrap_or(false);
+            let outgoing = scene
+                .graph
+                .get(&stage.id)
+                .map(|n| n.dest.len())
+                .unwrap_or(0);
 
-            let buttons = self.draw_node(
-                ui,
-                &painter,
-                stage,
-                node_rect,
-                is_root,
-                hovered,
-            );
+            let buttons =
+                self.draw_node(ui, &painter, stage, node_rect, is_root, hovered, outgoing);
 
             if hovered {
                 if let Some(p) = hover_pos {
@@ -365,10 +386,15 @@ impl GraphView {
                 }
             }
         }
-        if response.drag_started_by(egui::PointerButton::Middle)
-            || response.drag_started_by(egui::PointerButton::Secondary)
-        {
+        if response.drag_started_by(egui::PointerButton::Middle) {
             if !self.locked {
+                self.panning_bg = true;
+                self.pending_node = None;
+            }
+        }
+        if response.drag_started_by(egui::PointerButton::Secondary) {
+            let over_node = pointer_pos.and_then(|p| topmost_node_at(p)).is_some();
+            if !self.locked && !over_node {
                 self.panning_bg = true;
                 self.pending_node = None;
             }
@@ -383,7 +409,7 @@ impl GraphView {
             let delta = response.drag_delta();
 
             if self.connect_drag.is_some() {
-            } else if (self.panning_bg || mid_right_drag) && !self.locked {
+            } else if self.panning_bg && !self.locked {
                 self.pan += delta / self.zoom;
             } else if let Some(id) = self.pending_node.clone() {
                 self.drag_accum += delta;
@@ -492,6 +518,67 @@ impl GraphView {
             }
         }
 
+        if let Some((id, pos)) = self.node_menu.clone() {
+            let mut picked: Option<GraphAction> = None;
+            let mut close = false;
+            let mut remove_links = false;
+            let popup = egui::Area::new(egui::Id::new("stage_node_ctx"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .constrain(true)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(160.0);
+                        if ui.button("Edit").clicked() {
+                            picked = Some(GraphAction::OpenEditor(id.clone()));
+                        }
+                        if ui.button("Clone").clicked() {
+                            picked = Some(GraphAction::CloneStage(id.clone()));
+                        }
+                        if ui.button("Clone to…").clicked() {
+                            picked = Some(GraphAction::CloneStageTo(id.clone()));
+                        }
+                        if ui.button("Mark as root").clicked() {
+                            picked = Some(GraphAction::SetRoot(id.clone()));
+                        }
+                        if ui.button("Remove connections").clicked() {
+                            remove_links = true;
+                        }
+                        ui.separator();
+                        if ui
+                            .add(egui::Button::new(RichText::new("Delete").color(BTN_DANGER)))
+                            .clicked()
+                        {
+                            picked = Some(GraphAction::DeleteStage(id.clone()));
+                        }
+                    });
+                });
+            if remove_links {
+                self.push_undo(scene);
+                if let Some(node) = scene.graph.get_mut(&id) {
+                    node.dest.clear();
+                }
+                for node in scene.graph.values_mut() {
+                    node.dest.retain(|d| d != &id);
+                }
+                dirty = true;
+                close = true;
+            }
+            if picked.is_some() {
+                close = true;
+            }
+            // The RMB that opened the menu is "elsewhere" on this frame.
+            if popup.response.clicked_elsewhere() && !opened_node_menu {
+                close = true;
+            }
+            if let Some(act) = picked {
+                self.selected = Some(id);
+                action = act;
+            }
+            if close {
+                self.node_menu = None;
+            }
+        }
 
         if dirty {
             match action {
@@ -515,25 +602,12 @@ impl GraphView {
         let mut dirty = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let btn_size = egui::vec2(22.0, 18.0);
-            if ui
-                .add_enabled(
-                    !self.undo_stack.is_empty(),
-                    egui::Button::new("↺").small().min_size(btn_size),
-                )
-                .on_hover_text("Undo")
-                .clicked()
+            if toolbar_glyph_button(ui, "↺", "Undo", None, !self.undo_stack.is_empty()).clicked()
                 && self.undo(scene)
             {
                 dirty = true;
             }
-            if ui
-                .add_enabled(
-                    !self.redo_stack.is_empty(),
-                    egui::Button::new("↻").small().min_size(btn_size),
-                )
-                .on_hover_text("Redo")
-                .clicked()
+            if toolbar_glyph_button(ui, "↻", "Redo", None, !self.redo_stack.is_empty()).clicked()
                 && self.redo(scene)
             {
                 dirty = true;
@@ -553,39 +627,26 @@ impl GraphView {
                 self.push_undo(scene);
                 action = GraphAction::Arrange;
             }
-            let lock_resp = ui
-                .add_sized(
-                    btn_size,
-                    egui::Button::new(if self.locked { "📌" } else { "✋" }).small(),
-                )
-                .on_hover_text("Lock canvas (disables panning)");
-            if lock_resp.clicked() {
+            if toolbar_glyph_button(
+                ui,
+                if self.locked { "📌" } else { "✋" },
+                "Lock canvas (disables panning)",
+                None,
+                true,
+            )
+            .clicked()
+            {
                 self.locked = !self.locked;
             }
             ui.separator();
-            if ui
-                .add_sized(btn_size, egui::Button::new("−").small())
-                .on_hover_text("Zoom out")
-                .clicked()
-            {
+            if toolbar_glyph_button(ui, "−", "Zoom out", None, true).clicked() {
                 self.zoom_by(0.8);
             }
-            if ui
-                .add_sized(btn_size, egui::Button::new("+").small())
-                .on_hover_text("Zoom in")
-                .clicked()
-            {
+            if toolbar_glyph_button(ui, "+", "Zoom in", None, true).clicked() {
                 self.zoom_by(1.2);
             }
             ui.separator();
-            if ui
-                .add_sized(
-                    btn_size,
-                    egui::Button::new(RichText::new("✕").color(BTN_DANGER)).small(),
-                )
-                .on_hover_text("Clear canvas")
-                .clicked()
-            {
+            if toolbar_glyph_button(ui, "✕", "Clear canvas", Some(BTN_DANGER), true).clicked() {
                 action = GraphAction::ClearCanvas;
             }
         });
@@ -604,13 +665,14 @@ impl GraphView {
         node_rect: Rect,
         is_root: bool,
         hovered: bool,
+        outgoing: usize,
     ) -> Vec<(Rect, NodeButton)> {
         let z = self.zoom;
         let selected = self.selected.as_ref() == Some(&stage.id);
         let connect_src = self.connect_drag.as_ref() == Some(&stage.id);
         let has_climax = stage.positions.iter().any(|p| p.climax);
         let fixed_len = stage.extra.fixed_len;
-        let missing_nav = stage.extra.nav_text.trim().is_empty() && !is_root;
+        let missing_nav = outgoing > 1 && stage.extra.nav_text.trim().is_empty();
 
         let fill = if fixed_len > 0.0 {
             if fixed_len < 50.0 {
@@ -678,7 +740,8 @@ impl GraphView {
             Stroke::new(2.0 * z.clamp(0.5, 1.2), Color32::BLACK),
         );
 
-        let icon_y = node_rect.top() + HEADER_H * 0.5 * z;
+        let header_h = (HEADER_H * z).max(1.0);
+        let icon_y = node_rect.top() + header_h * 0.5;
         let mut icon_x = node_rect.left() + 10.0 * z;
         let mut status: Vec<(StatusKind, Color32, &str)> = Vec::new();
         if is_root {
@@ -688,12 +751,16 @@ impl GraphView {
             status.push((StatusKind::Orgasm, ICON_ORGASM, "Orgasm Stage"));
         }
         if missing_nav {
-            status.push((StatusKind::Warn, ICON_WARN, "Missing navigation text"));
+            status.push((
+                StatusKind::Warn,
+                ICON_WARN,
+                "Missing choice label for this branch",
+            ));
         }
         if fixed_len > 0.0 {
             status.push((StatusKind::Fixed, ICON_FIXED, "Fixed Length"));
         }
-        let icon_draw = (ICON_HIT * z.clamp(0.55, 1.35)).max(14.0);
+        let icon_draw = ICON_HIT * z;
         for (kind, color, tip) in &status {
             let icon_rect = Rect::from_center_size(
                 Pos2::new(icon_x + icon_draw * 0.5, icon_y),
@@ -717,34 +784,45 @@ impl GraphView {
 
         let mut buttons = Vec::new();
         if hovered {
-            let header_h = (HEADER_H * z).max(1.0);
-            let pad = (6.0 * z).max(2.0);
-            let gap = (3.0 * z).clamp(1.0, 3.0);
-            let mut btn_size = (ICON_HIT * z).clamp(7.0, ICON_HIT).min(header_h - 2.0).max(6.0);
-            let mut root_font_sz = (12.0 * z).clamp(8.0, 12.0);
-            let mut root_font = egui::FontId::proportional(root_font_sz);
+            let pad = 6.0 * z;
+            let gap = 3.0 * z;
+            let btn_size = ICON_HIT * z;
+            let root_font = egui::FontId::proportional(ROOT_FONT_PX * z);
             let mut root_w = painter
                 .layout_no_wrap("Root".to_string(), root_font.clone(), Color32::BLACK)
                 .size()
                 .x
-                + (6.0 * z).max(4.0);
+                + 6.0 * z;
             root_w = root_w.max(btn_size);
 
             let strip_w = btn_size * 4.0 + root_w + gap * 4.0;
-            let max_strip = (node_rect.width() * 0.62).max(btn_size);
-            if strip_w > max_strip {
+            let max_strip = (node_rect.width() - pad * 2.0).max(btn_size);
+            let (btn_size, root_w, root_font) = if strip_w > max_strip {
                 let s = max_strip / strip_w;
-                btn_size = (btn_size * s).max(6.0);
-                root_w = (root_w * s).max(btn_size);
-                root_font_sz = (root_font_sz * s).max(7.0);
-                root_font = egui::FontId::proportional(root_font_sz);
-            }
+                (
+                    (btn_size * s).max(4.0),
+                    (root_w * s).max(4.0),
+                    egui::FontId::proportional((ROOT_FONT_PX * z * s).max(5.0)),
+                )
+            } else {
+                (btn_size, root_w, root_font)
+            };
+            let strip_clip = node_rect.intersect(painter.clip_rect());
+            let icon_painter = painter.with_clip_rect(strip_clip);
 
             let entries: [(NodeButton, &str, Color32); 5] = [
                 (NodeButton::Edit, "Edit", crate::theme::SCENE_NODE_TEXT),
                 (NodeButton::Clone, "Clone", crate::theme::SCENE_NODE_TEXT),
-                (NodeButton::CloneTo, "Clone to…", crate::theme::SCENE_NODE_TEXT),
-                (NodeButton::Root, "Mark as root", crate::theme::SCENE_NODE_TEXT),
+                (
+                    NodeButton::CloneTo,
+                    "Clone to…",
+                    crate::theme::SCENE_NODE_TEXT,
+                ),
+                (
+                    NodeButton::Root,
+                    "Mark as root",
+                    crate::theme::SCENE_NODE_TEXT,
+                ),
                 (NodeButton::Delete, "Delete", BTN_DANGER),
             ];
             let mut right = node_rect.right() - pad;
@@ -765,7 +843,7 @@ impl GraphView {
                     .map(|p| btn_rect.contains(p))
                     .unwrap_or(false);
                 if over {
-                    painter.rect_filled(
+                    icon_painter.rect_filled(
                         btn_rect,
                         4.0,
                         Color32::from_rgba_unmultiplied(0, 0, 0, 20),
@@ -781,7 +859,7 @@ impl GraphView {
                 }
                 match btn {
                     NodeButton::Root => {
-                        painter.text(
+                        icon_painter.text(
                             btn_rect.center(),
                             egui::Align2::CENTER_CENTER,
                             "Root",
@@ -789,7 +867,7 @@ impl GraphView {
                             *color,
                         );
                     }
-                    other => draw_ctrl_icon(painter, *other, btn_rect.shrink(2.0), *color),
+                    other => draw_ctrl_icon(&icon_painter, *other, btn_rect.shrink(2.0), *color),
                 }
                 buttons.push((btn_rect, *btn));
                 right -= w + gap;
@@ -801,14 +879,18 @@ impl GraphView {
         } else {
             stage.name.clone()
         };
-        let name_font = egui::FontId::proportional((15.0 * z.clamp(0.7, 1.25)).max(11.0));
-        let max_w = node_rect.width() - 24.0 * z;
+        let pad = 8.0 * z;
+        let body_h = (node_rect.bottom() - header_bottom).max(1.0);
+        let name_font = egui::FontId::proportional(NAME_PX * z);
+        let max_w = (node_rect.width() - pad).max(8.0);
         let text = truncate_to_width(painter, &label, &name_font, max_w);
-        let name_area_center = Pos2::new(
-            node_rect.center().x,
-            header_bottom + (node_rect.bottom() - header_bottom) * 0.5,
-        );
-        painter.text(
+        let name_area_center = Pos2::new(node_rect.center().x, header_bottom + body_h * 0.5);
+        let name_clip = Rect::from_min_max(
+            Pos2::new(node_rect.left() + pad * 0.5, header_bottom),
+            node_rect.right_bottom(),
+        )
+        .intersect(painter.clip_rect());
+        painter.with_clip_rect(name_clip).text(
             name_area_center,
             egui::Align2::CENTER_CENTER,
             text,
@@ -820,10 +902,7 @@ impl GraphView {
     }
 
     fn port_screen_rect(&self, rect: Rect, world_pos: Pos2) -> Rect {
-        let base = self.world_to_screen(
-            rect,
-            world_pos + Vec2::new(NODE_W - 1.0, NODE_H * 0.5),
-        );
+        let base = self.world_to_screen(rect, world_pos + Vec2::new(NODE_W - 1.0, NODE_H * 0.5));
         Rect::from_min_max(
             Pos2::new(base.x - 4.0 * self.zoom, base.y - 40.0 * self.zoom),
             Pos2::new(base.x + 12.0 * self.zoom, base.y + 40.0 * self.zoom),
@@ -1063,7 +1142,10 @@ fn draw_status_icon(painter: &egui::Painter, kind: StatusKind, rect: Rect, color
         StatusKind::Fixed => {
             let stroke = Stroke::new((s * 0.22).max(1.5), color);
             painter.line_segment(
-                [Pos2::new(c.x - s * 0.7, c.y), Pos2::new(c.x + s * 0.35, c.y)],
+                [
+                    Pos2::new(c.x - s * 0.7, c.y),
+                    Pos2::new(c.x + s * 0.35, c.y),
+                ],
                 stroke,
             );
             painter.add(egui::Shape::convex_polygon(
@@ -1111,7 +1193,7 @@ enum ToolbarIcon {
 }
 
 fn toolbar_icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, tip: &str) -> egui::Response {
-    let size = egui::vec2(22.0, 18.0);
+    let size = egui::vec2(TOOLBAR_BTN, TOOLBAR_BTN);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let visuals = ui.style().interact(&resp);
     ui.painter().rect(
@@ -1122,8 +1204,49 @@ fn toolbar_icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, tip: &str) -> egui:
         egui::StrokeKind::Inside,
     );
     let color = visuals.fg_stroke.color;
-    draw_toolbar_icon(ui.painter(), icon, rect.shrink(3.0), color);
+    draw_toolbar_icon(ui.painter(), icon, rect.shrink(4.0), color);
     resp.on_hover_text(tip)
+}
+
+fn toolbar_glyph_button(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tip: &str,
+    color: Option<Color32>,
+    enabled: bool,
+) -> egui::Response {
+    let size = egui::vec2(TOOLBAR_BTN, TOOLBAR_BTN);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, mut resp) = ui.allocate_exact_size(size, sense);
+    if !enabled {
+        resp = resp.on_disabled_hover_text(tip);
+    }
+    let visuals = ui.style().interact(&resp);
+    ui.painter().rect(
+        rect,
+        2.0,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let fg = color.unwrap_or(visuals.fg_stroke.color);
+    let fg = if enabled { fg } else { Color32::from_gray(130) };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(14.0),
+        fg,
+    );
+    if enabled {
+        resp.on_hover_text(tip)
+    } else {
+        resp
+    }
 }
 
 fn draw_toolbar_icon(painter: &egui::Painter, icon: ToolbarIcon, rect: Rect, color: Color32) {
@@ -1162,14 +1285,8 @@ fn draw_toolbar_icon(painter: &egui::Painter, icon: ToolbarIcon, rect: Rect, col
                 (r.left(), r.bottom(), 1.0, -1.0),
                 (r.right(), r.bottom(), -1.0, -1.0),
             ] {
-                painter.line_segment(
-                    [Pos2::new(x, y), Pos2::new(x + dx * t, y)],
-                    stroke,
-                );
-                painter.line_segment(
-                    [Pos2::new(x, y), Pos2::new(x, y + dy * t)],
-                    stroke,
-                );
+                painter.line_segment([Pos2::new(x, y), Pos2::new(x + dx * t, y)], stroke);
+                painter.line_segment([Pos2::new(x, y), Pos2::new(x, y + dy * t)], stroke);
             }
         }
         ToolbarIcon::Arrange => {
@@ -1208,14 +1325,8 @@ fn draw_ctrl_icon(painter: &egui::Painter, btn: NodeButton, rect: Rect, color: C
             let e0 = Pos2::new(c.x + s * 0.15, c.y - s * 0.55);
             let e1 = Pos2::new(c.x + s * 0.55, c.y - s * 0.15);
             painter.line_segment([e0, e1], stroke);
-            painter.line_segment(
-                [Pos2::new(c.x + s * 0.05, c.y - s * 0.35), e0],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(c.x + s * 0.35, c.y - s * 0.05), e1],
-                stroke,
-            );
+            painter.line_segment([Pos2::new(c.x + s * 0.05, c.y - s * 0.35), e0], stroke);
+            painter.line_segment([Pos2::new(c.x + s * 0.35, c.y - s * 0.05), e1], stroke);
         }
         NodeButton::Clone => {
             let back = Rect::from_min_max(
